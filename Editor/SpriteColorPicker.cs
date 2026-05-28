@@ -7,7 +7,7 @@ namespace SpriteTools
 {
     /// <summary>
     /// Non-destructive batch sprite recolor tool with Photoshop-style blend modes.
-    /// Copies are saved alongside originals — source textures are never modified.
+    /// Supports SpriteRenderer and UI Image. Copies are saved alongside originals.
     /// </summary>
     public class SpriteColorPicker : EditorWindow
     {
@@ -65,6 +65,24 @@ namespace SpriteTools
         };
 
         // ──────────────────────────────────────
+        //  Preset
+        // ──────────────────────────────────────
+
+        [System.Serializable]
+        private class Preset
+        {
+            public string name;
+            public Color color;
+            public BlendMode mode;
+            public float intensity;
+        }
+
+        private List<Preset> _presets = new List<Preset>();
+        private string _newPresetName = "";
+        private bool _showPresets;
+        private const string PresetEditorPrefsKey = "SpriteRecolor_Presets";
+
+        // ──────────────────────────────────────
         //  State
         // ──────────────────────────────────────
 
@@ -93,11 +111,21 @@ namespace SpriteTools
         private static void Open()
         {
             var win = GetWindow<SpriteColorPicker>("Sprite Recolor");
-            win.minSize = new Vector2(300, 420);
+            win.minSize = new Vector2(300, 480);
         }
 
-        private void OnEnable()  => Selection.selectionChanged += MarkPreviewDirty;
-        private void OnDisable() { Selection.selectionChanged -= MarkPreviewDirty; DestroyPreview(); }
+        private void OnEnable()
+        {
+            Selection.selectionChanged += MarkPreviewDirty;
+            LoadPresets();
+        }
+
+        private void OnDisable()
+        {
+            Selection.selectionChanged -= MarkPreviewDirty;
+            DestroyPreview();
+            SavePresets();
+        }
 
         private void MarkPreviewDirty() { _cachedSrcId = 0; Repaint(); }
 
@@ -110,6 +138,7 @@ namespace SpriteTools
             _scrollPos = EditorGUILayout.BeginScrollView(_scrollPos);
 
             DrawSettings();
+            DrawPresetSection();
             DrawSelectionInfo();
             DrawPreviewSection();
             DrawApplyButton();
@@ -127,7 +156,6 @@ namespace SpriteTools
                 new GUIContent("Target Color", "Click the eyedropper to pick from screen"),
                 _targetColor, true, false, false);
 
-            // Blend mode dropdown + tooltip
             int modeIdx = (int)_blendMode;
             string[] labels = new string[ModeInfo.Length];
             for (int i = 0; i < ModeInfo.Length; i++) labels[i] = ModeInfo[i].label;
@@ -137,7 +165,6 @@ namespace SpriteTools
                 modeIdx, labels);
             _blendMode = (BlendMode)modeIdx;
 
-            // Mode description (always visible)
             EditorGUILayout.HelpBox(ModeInfo[modeIdx].tooltip, MessageType.None);
 
             _intensity = EditorGUILayout.Slider(
@@ -145,22 +172,127 @@ namespace SpriteTools
                 _intensity, 0f, 1f);
         }
 
+        // ──────────────────────────────────────
+        //  Presets GUI
+        // ──────────────────────────────────────
+
+        private void DrawPresetSection()
+        {
+            EditorGUILayout.Space(4);
+            _showPresets = EditorGUILayout.Foldout(_showPresets, $"Presets ({_presets.Count})", true);
+            if (!_showPresets) return;
+
+            // Save current as preset
+            EditorGUILayout.BeginHorizontal();
+            _newPresetName = EditorGUILayout.TextField(_newPresetName, GUILayout.ExpandWidth(true));
+            GUI.enabled = !string.IsNullOrWhiteSpace(_newPresetName);
+            if (GUILayout.Button("Save", GUILayout.Width(50)))
+            {
+                _presets.Add(new Preset
+                {
+                    name = _newPresetName.Trim(),
+                    color = _targetColor,
+                    mode = _blendMode,
+                    intensity = _intensity,
+                });
+                _newPresetName = "";
+                SavePresets();
+            }
+            GUI.enabled = true;
+            EditorGUILayout.EndHorizontal();
+
+            // List presets
+            int removeIdx = -1;
+            for (int i = 0; i < _presets.Count; i++)
+            {
+                var p = _presets[i];
+                EditorGUILayout.BeginHorizontal();
+
+                // Color swatch
+                EditorGUI.DrawRect(GUILayoutUtility.GetRect(16, 16, GUILayout.Width(16)), p.color);
+                GUILayout.Space(4);
+
+                // Load button
+                if (GUILayout.Button(p.name, EditorStyles.miniButtonLeft, GUILayout.ExpandWidth(true)))
+                {
+                    _targetColor = p.color;
+                    _blendMode = p.mode;
+                    _intensity = p.intensity;
+                }
+
+                // Mode label
+                GUILayout.Label(ModeInfo[(int)p.mode].label, EditorStyles.miniLabel, GUILayout.Width(70));
+
+                // Delete
+                if (GUILayout.Button("×", EditorStyles.miniButtonRight, GUILayout.Width(20)))
+                    removeIdx = i;
+
+                EditorGUILayout.EndHorizontal();
+            }
+
+            if (removeIdx >= 0)
+            {
+                _presets.RemoveAt(removeIdx);
+                SavePresets();
+            }
+        }
+
+        private void SavePresets()
+        {
+            var wrapper = new PresetListWrapper { items = _presets };
+            EditorPrefs.SetString(PresetEditorPrefsKey, JsonUtility.ToJson(wrapper));
+        }
+
+        private void LoadPresets()
+        {
+            string json = EditorPrefs.GetString(PresetEditorPrefsKey, "");
+            if (!string.IsNullOrEmpty(json))
+            {
+                var wrapper = JsonUtility.FromJson<PresetListWrapper>(json);
+                if (wrapper != null && wrapper.items != null)
+                    _presets = wrapper.items;
+            }
+        }
+
+        [System.Serializable]
+        private class PresetListWrapper
+        {
+            public List<Preset> items = new List<Preset>();
+        }
+
+        // ──────────────────────────────────────
+        //  Selection Info
+        // ──────────────────────────────────────
+
         private void DrawSelectionInfo()
         {
             EditorGUILayout.Space(4);
-            int count = CountSelectedRenderers();
-            EditorGUILayout.HelpBox(
-                count > 0
-                    ? $"Selected: {count} SpriteRenderer(s)"
-                    : "Select objects in Hierarchy or Scene",
-                count > 0 ? MessageType.Info : MessageType.Warning);
+            CountSelectedTargets(out int spriteCount, out int imageCount);
+            int total = spriteCount + imageCount;
+
+            if (total > 0)
+            {
+                string msg = "";
+                if (spriteCount > 0) msg += $"{spriteCount} SpriteRenderer(s)";
+                if (imageCount > 0)
+                {
+                    if (msg.Length > 0) msg += " + ";
+                    msg += $"{imageCount} UI Image(s)";
+                }
+                EditorGUILayout.HelpBox($"Selected: {msg}", MessageType.Info);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "Select objects with SpriteRenderer or UI Image", MessageType.Warning);
+            }
         }
 
         private void DrawApplyButton()
         {
             EditorGUILayout.Space(8);
-            int count = CountSelectedRenderers();
-            GUI.enabled = count > 0;
+            CountSelectedTargets(out int sc, out int ic);
+            GUI.enabled = sc + ic > 0;
             if (GUILayout.Button("Apply Recolor", GUILayout.Height(32)))
                 ApplyRecolor();
             GUI.enabled = true;
@@ -188,11 +320,10 @@ namespace SpriteTools
             Texture2D srcTex = GetFirstSelectedTexture(out int srcId);
             if (srcTex == null)
             {
-                EditorGUILayout.HelpBox("Select a SpriteRenderer to see preview.", MessageType.None);
+                EditorGUILayout.HelpBox("Select a SpriteRenderer or UI Image to preview.", MessageType.None);
                 return;
             }
 
-            // Rebuild source cache on selection change
             if (srcId != _cachedSrcId)
             {
                 CachePreviewSource(srcTex);
@@ -200,7 +331,6 @@ namespace SpriteTools
                 _cachedColor = default;
             }
 
-            // Rebuild blend result on parameter change
             bool paramsDirty = _targetColor != _cachedColor
                             || _blendMode  != _cachedMode
                             || !Mathf.Approximately(_intensity, _cachedIntensity);
@@ -215,7 +345,6 @@ namespace SpriteTools
 
             if (_previewTex == null) return;
 
-            // Side-by-side display
             float halfW = Mathf.Min(position.width * 0.42f, PreviewMax);
             EditorGUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
@@ -243,11 +372,19 @@ namespace SpriteTools
             if (Selection.gameObjects == null) return null;
             foreach (var go in Selection.gameObjects)
             {
+                // SpriteRenderer
                 var sr = go.GetComponentInChildren<SpriteRenderer>();
                 if (sr != null && sr.sprite != null && sr.sprite.texture != null)
                 {
                     id = sr.sprite.texture.GetInstanceID();
                     return sr.sprite.texture;
+                }
+                // UI Image
+                var img = go.GetComponentInChildren<UnityEngine.UI.Image>();
+                if (img != null && img.sprite != null && img.sprite.texture != null)
+                {
+                    id = img.sprite.texture.GetInstanceID();
+                    return img.sprite.texture;
                 }
             }
             return null;
@@ -349,7 +486,6 @@ namespace SpriteTools
                     break;
             }
 
-            // Intensity: lerp between original and result
             if (intensity < 1f)
             {
                 float inv = 1f - intensity;
@@ -365,10 +501,6 @@ namespace SpriteTools
                 src.a);
         }
 
-        /// <summary>
-        /// Replace hue only — keeps original saturation and brightness.
-        /// A red apple becomes a green apple with identical shading.
-        /// </summary>
         private static void HueShift(float sr, float sg, float sb, Color target,
                                      out float rr, out float rg, out float rb)
         {
@@ -379,10 +511,6 @@ namespace SpriteTools
             rr = result.r; rg = result.g; rb = result.b;
         }
 
-        /// <summary>
-        /// Replace hue + saturation — keeps only brightness from source.
-        /// Like painting a watercolor wash over a pencil sketch.
-        /// </summary>
         private static void Colorize(float sr, float sg, float sb, Color target,
                                      out float rr, out float rg, out float rb)
         {
@@ -394,22 +522,54 @@ namespace SpriteTools
         }
 
         // ──────────────────────────────────────
-        //  Apply (批量处理)
+        //  Apply — collect targets
         // ──────────────────────────────────────
 
-        private int CountSelectedRenderers()
+        private struct RecolorTarget
         {
-            int n = 0;
-            foreach (var go in Selection.gameObjects)
-                n += go.GetComponentsInChildren<SpriteRenderer>().Length;
-            return n;
+            public Component component;  // SpriteRenderer or Image
+            public Sprite sprite;
+            public Texture2D texture;
         }
+
+        private static void CountSelectedTargets(out int spriteCount, out int imageCount)
+        {
+            spriteCount = 0;
+            imageCount = 0;
+            foreach (var go in Selection.gameObjects)
+            {
+                spriteCount += go.GetComponentsInChildren<SpriteRenderer>().Length;
+                imageCount  += go.GetComponentsInChildren<UnityEngine.UI.Image>().Length;
+            }
+        }
+
+        private static List<RecolorTarget> GatherTargets()
+        {
+            var targets = new List<RecolorTarget>();
+            foreach (var go in Selection.gameObjects)
+            {
+                foreach (var sr in go.GetComponentsInChildren<SpriteRenderer>())
+                {
+                    if (sr.sprite != null && sr.sprite.texture != null)
+                        targets.Add(new RecolorTarget { component = sr, sprite = sr.sprite, texture = sr.sprite.texture });
+                }
+                foreach (var img in go.GetComponentsInChildren<UnityEngine.UI.Image>())
+                {
+                    if (img.sprite != null && img.sprite.texture != null)
+                        targets.Add(new RecolorTarget { component = img, sprite = img.sprite, texture = img.sprite.texture });
+                }
+            }
+            return targets;
+        }
+
+        // ──────────────────────────────────────
+        //  Apply — main
+        // ──────────────────────────────────────
 
         private void ApplyRecolor()
         {
-            var renderers = new List<SpriteRenderer>();
-            foreach (var go in Selection.gameObjects)
-                renderers.AddRange(go.GetComponentsInChildren<SpriteRenderer>());
+            var targets = GatherTargets();
+            if (targets.Count == 0) return;
 
             var processed = new Dictionary<string, string>();
             int texCount = 0;
@@ -418,16 +578,13 @@ namespace SpriteTools
             int undoGroup = Undo.GetCurrentGroup();
 
             // ── Write recolored PNGs ──
-            for (int i = 0; i < renderers.Count; i++)
+            for (int i = 0; i < targets.Count; i++)
             {
-                var sr = renderers[i];
-                if (sr.sprite == null || sr.sprite.texture == null) continue;
-
-                string srcPath = TraceSourcePath(AssetDatabase.GetAssetPath(sr.sprite.texture));
+                string srcPath = TraceSourcePath(AssetDatabase.GetAssetPath(targets[i].texture));
                 if (string.IsNullOrEmpty(srcPath) || processed.ContainsKey(srcPath)) continue;
 
-                EditorUtility.DisplayProgressBar("Recoloring", Path.GetFileName(srcPath),
-                    (float)i / renderers.Count);
+                EditorUtility.DisplayProgressBar("Recoloring",
+                    Path.GetFileName(srcPath), (float)i / targets.Count);
 
                 string copyPath = BuildCopyPath(srcPath);
                 EnsureDirectory(copyPath);
@@ -447,29 +604,43 @@ namespace SpriteTools
             foreach (var kv in processed) CopyImportSettings(kv.Key, kv.Value);
 
             // ── Assign sprites ──
-            foreach (var sr in renderers)
+            int srCount = 0, imgCount = 0;
+            foreach (var t in targets)
             {
-                if (sr.sprite == null || sr.sprite.texture == null) continue;
-
-                string srcPath = TraceSourcePath(AssetDatabase.GetAssetPath(sr.sprite.texture));
+                string srcPath = TraceSourcePath(AssetDatabase.GetAssetPath(t.texture));
                 if (!processed.TryGetValue(srcPath, out string copyPath)) continue;
 
-                Sprite match = FindMatchingSprite(sr.sprite, copyPath);
-                if (match != null)
+                Sprite match = FindMatchingSprite(t.sprite, copyPath);
+                if (match == null)
+                {
+                    Debug.LogWarning($"[Recolor] Failed to load sprite from: {copyPath}");
+                    continue;
+                }
+
+                if (t.component is SpriteRenderer sr)
                 {
                     Undo.RecordObject(sr, "Recolor Sprite");
                     sr.sprite = match;
-                    sr.color  = Color.white;
+                    sr.color = Color.white;
                     EditorUtility.SetDirty(sr);
+                    srCount++;
                 }
-                else
+                else if (t.component is UnityEngine.UI.Image img)
                 {
-                    Debug.LogWarning($"[Recolor] Failed to load sprite from: {copyPath}");
+                    Undo.RecordObject(img, "Recolor Image");
+                    img.sprite = match;
+                    img.color = Color.white;
+                    EditorUtility.SetDirty(img);
+                    imgCount++;
                 }
             }
 
             Undo.CollapseUndoOperations(undoGroup);
-            Debug.Log($"[Recolor] Done — {texCount} texture(s), {renderers.Count} renderer(s)");
+
+            string log = $"[Recolor] Done — {texCount} texture(s)";
+            if (srCount > 0) log += $", {srCount} SpriteRenderer(s)";
+            if (imgCount > 0) log += $", {imgCount} UI Image(s)";
+            Debug.Log(log);
         }
 
         // ──────────────────────────────────────
@@ -494,9 +665,6 @@ namespace SpriteTools
             Object.DestroyImmediate(output);
         }
 
-        /// <summary>
-        /// Read pixels via RenderTexture — bypasses isReadable restriction.
-        /// </summary>
         private static Color32[] ReadPixels32ViaRT(Texture2D source)
         {
             var rt = RenderTexture.GetTemporary(source.width, source.height, 0, RenderTextureFormat.ARGB32);
@@ -545,20 +713,14 @@ namespace SpriteTools
             dst.SaveAndReimport();
         }
 
-        /// <summary>
-        /// Match sub-sprite by name for Multiple-mode atlases.
-        /// Falls back to the first Sprite for Single-mode.
-        /// </summary>
         private static Sprite FindMatchingSprite(Sprite original, string copyPath)
         {
             var assets = AssetDatabase.LoadAllAssetsAtPath(copyPath);
             if (assets == null) return null;
 
-            // Exact name match first (Multiple mode)
             foreach (var a in assets)
                 if (a is Sprite sp && sp.name == original.name) return sp;
 
-            // Fallback: first sprite (Single mode)
             foreach (var a in assets)
                 if (a is Sprite sp) return sp;
 
@@ -569,10 +731,6 @@ namespace SpriteTools
         //  Path Utilities
         // ──────────────────────────────────────
 
-        /// <summary>
-        /// Given a path that might be a copy, trace back to the original source.
-        /// Prevents nested copy/copy/copy chains.
-        /// </summary>
         private static string TraceSourcePath(string path)
         {
             string dir  = Path.GetDirectoryName(path).Replace("\\", "/");
