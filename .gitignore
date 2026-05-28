@@ -1,0 +1,16 @@
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vs/
+.vscode/
+*.csproj
+*.sln
+*.suo
+*.user
+
+# Unity meta files are intentionally tracked for package compatibility
+# *.meta
